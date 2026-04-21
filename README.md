@@ -165,7 +165,7 @@ wait
 
 ---
 
-### ☁️ Deployment
+## ☁️ Deployment
 
 This project is containerized using Docker and is fully cloud-agnostic. It is currently deployed and live on Render.
 
