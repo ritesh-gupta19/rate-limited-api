@@ -178,9 +178,3 @@ This project is fully **cloud-agnostic**. The included `Dockerfile` uses a multi
 ### AWS ECS / Fargate
 
 Deploy the container using an **Elasticache Redis** backend as the data store and queue broker.
-
----
-
-## 📄 License
-
-MIT
