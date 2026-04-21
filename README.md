@@ -1,22 +1,52 @@
-# Rate-Limited API Service
+# 🚦 Rate-Limited API Service
 
-## Setup
-
-```bash
-npm install
-npm start          # production
-npm run dev        # with auto-reload (nodemon)
-```
-
-Server starts on `http://localhost:3000`.
+A production-ready, distributed REST API service that enforces a strict limit of **5 requests per minute per user** using a **Sliding Window** algorithm backed by **Redis**, with asynchronous payload processing via **BullMQ**.
 
 ---
 
-## Endpoints
+## 📦 Tech Stack
 
-### POST /request
+| Layer | Technology |
+|---|---|
+| Runtime | Node.js (v18+) |
+| Framework | Express.js |
+| Data Store / Cache | Redis (via `ioredis`) |
+| Background Queue | BullMQ |
+| Infrastructure | Docker & Docker Compose |
 
-Accepts a payload and processes it (rate-limited: 5 requests per user per minute).
+---
+
+## ⚙️ Setup & Installation
+
+### Option A: Docker (Recommended)
+
+The fastest way to spin up the application and its Redis dependency together.
+
+```bash
+docker-compose up -d
+```
+
+### Option B: Local Node.js
+
+Requires a local Redis instance running on port `6379`.
+
+```bash
+# Install dependencies
+npm install
+
+# Start the development server
+npm run dev
+```
+
+> Server starts on **http://localhost:3000**
+
+---
+
+## 📡 API Endpoints
+
+### `POST /request`
+
+Accepts a payload and queues it for background processing. Rate-limited to **5 requests per user per 60 seconds**.
 
 **Request**
 ```bash
@@ -25,209 +55,130 @@ curl -s -X POST http://localhost:3000/request \
   -d '{"user_id": "alice", "payload": {"action": "buy", "item": "book"}}'
 ```
 
-**200 Response**
+**`202 Accepted` — Success**
 ```json
 {
-  "success": true,
-  "request_id": "f4a3c2d1-...",
+  "message": "Request accepted and queued",
+  "job_id": "1",
   "user_id": "alice",
-  "payload_received": { "action": "buy", "item": "book" },
-  "processed_at": "2024-01-15T10:30:00.000Z",
-  "rate_limit": {
-    "remaining": 4,
-    "limit": 5,
-    "window": "60s"
-  }
+  "rate_limit_remaining": 4
 }
 ```
 
-**429 Response (when limit is exceeded)**
+**`429 Too Many Requests` — Limit Exceeded**
 ```json
 {
   "error": "Too Many Requests",
-  "message": "Rate limit of 5 requests per 60s exceeded.",
+  "message": "Limit of 5 requests per minute exceeded.",
   "retry_after_seconds": 38
 }
 ```
 
-Response Headers:
-```
-X-RateLimit-Limit: 5
-X-RateLimit-Remaining: 4
-X-RateLimit-Window: 60s
-Retry-After: 38   ← only on 429
-```
+**Response Headers**
+
+| Header | Description |
+|---|---|
+| `X-RateLimit-Limit` | Maximum requests allowed per window |
+| `X-RateLimit-Remaining` | Requests remaining in the current window |
+| `X-RateLimit-Window` | Window duration (`60s`) |
+| `Retry-After` | Seconds until the limit resets *(only on `429`)* |
 
 ---
 
-### GET /stats
+### `GET /stats`
 
-Returns real-time rate-limit state for all tracked users (or a specific user).
+Returns real-time rate-limit state for all active users within the current window. **Not rate-limited.**
 
 ```bash
-# All users
 curl http://localhost:3000/stats
-
-# Single user
-curl http://localhost:3000/stats?user_id=alice
 ```
 
-**Response**
 ```json
 {
-  "stats": {
+  "active_users_in_window": {
     "alice": {
-      "current_window_used": 3,
-      "current_window_remaining": 2,
-      "rate_limit": 5,
-      "window_duration_seconds": 60,
-      "retry_after_seconds": 0,
-      "total_requests_all_time": 12,
-      "last_request_at": "2024-01-15T10:30:00.000Z"
+      "current_window_used": 3
     }
-  },
-  "total_tracked_users": 1,
-  "snapshot_at": "2024-01-15T10:30:05.000Z"
+  }
 }
 ```
 
 ---
 
-### GET /health
+### `GET /health`
 
-Liveness probe — no rate limiting.
+Liveness probe for cloud load balancers and container orchestration.
 
 ```bash
 curl http://localhost:3000/health
-# { "status": "ok", "uptime": 42.1 }
+```
+
+```json
+{ "status": "UP", "uptime": 42.1 }
 ```
 
 ---
 
-## Testing concurrent requests manually
+## 🏗️ Architecture & Design Decisions
+
+### 1. Distributed Rate Limiting (Redis Lua Scripting)
+
+This service uses a **Redis Sorted Set (ZSET)** to implement an exact Sliding Window algorithm, avoiding the burst-exploitation vulnerability of a fixed-window approach.
+
+- **Atomicity:** Validation, eviction of stale timestamps, and insertion of new requests are executed via a custom Lua script — guaranteeing 100% atomicity and preventing race conditions under heavy parallel load across multiple Node.js instances.
+- **Non-Blocking Stats:** The `/stats` endpoint uses `scanStream` instead of the blocking `KEYS *` command to safely fetch active user metrics without stalling the Redis event loop.
+
+### 2. Asynchronous Processing (BullMQ)
+
+The `POST /request` endpoint never blocks on payload processing. It immediately returns `202 Accepted` and offloads work to a Redis-backed queue, where background workers consume jobs asynchronously.
+
+- **Resilience:** BullMQ is configured to automatically retry failed jobs **3 times** with exponential backoff.
+
+### 3. Production Readiness
+
+| Feature | Implementation |
+|---|---|
+| Graceful Shutdown | `SIGINT` / `SIGTERM` handlers cleanly drain the Express server, BullMQ workers, and Redis connections |
+| HTTP Security | `helmet` middleware for secure response headers |
+| Request Logging | `morgan` for structured request logging |
+
+---
+
+## 🧪 Testing Concurrency
+
+To verify sliding window logic and Redis atomicity, fire parallel requests against the same user:
 
 ```bash
-# Fire 7 requests for the same user in parallel
-for i in $(seq 1 7); do
-  curl -s -X POST http://localhost:3000/request \
+# Fire 7 parallel requests for the same user
+for i in {1..7}; do
+  curl -s -o /dev/null -w "Request $i: HTTP %{http_code}\n" \
+    -X POST http://localhost:3000/request \
     -H "Content-Type: application/json" \
-    -d '{"user_id":"bob","payload":"test"}' &
+    -d '{"user_id": "spammer_user", "payload": "spam"}' &
 done
 wait
 ```
 
-First 5 → 200, last 2 → 429.
+**Expected result:** The first 5 requests return `HTTP 202`; the remaining 2 return `HTTP 429`.
 
 ---
 
-## Rate Limiting Design: Sliding Window
+## ☁️ Cloud Deployment
 
-Unlike a fixed window (resets every full minute), a **sliding window** tracks
-timestamps of the last N requests. This prevents burst exploitation around
-window reset boundaries.
+This project is fully **cloud-agnostic**. The included `Dockerfile` uses a multi-stage, least-privilege (`USER node`) build optimised for production via `npm ci`.
 
-Example: limit = 5/min, fixed window
-- 23:59:58 → 5 requests (fills window)
-- 00:00:01 → 5 more requests (new window!) → 10 in 3 seconds ✗
+### Azure Web Apps for Containers
 
-Sliding window sees all 10 timestamps within 60s → blocks correctly.
+1. Push the Docker image to **Azure Container Registry (ACR)**.
+2. Point **Azure App Service** to the image.
+3. Provide an **Azure Cache for Redis** connection string via the `REDIS_URL` environment variable.
 
----
+### AWS ECS / Fargate
 
-## Production Limitations
-
-| Limitation | Impact | Fix |
-|---|---|---|
-| In-memory store | Lost on restart; not shared across processes | Redis with atomic INCR/EXPIRE |
-| Single process only | PM2 cluster / k8s multi-pod breaks shared state | Redis Lua scripts or Redlock |
-| No persistence | Stats reset on deploy | Redis or a time-series DB |
-| No authentication | user_id is self-reported (trust-based) | JWT / API key verification |
-| No payload processing | Echo-only | Queue (BullMQ, SQS) + worker |
-| Memory growth | Map grows unboundedly with unique users | TTL-based eviction or LRU cache |
+Deploy the container using an **Elasticache Redis** backend as the data store and queue broker.
 
 ---
 
-## Bonus Additions (Optional)
+## 📄 License
 
-### Redis-backed rate limiting
-
-Replace `rateLimiter.js` with `ioredis` + a Lua script for atomic sliding window:
-
-```js
-const redis = require('ioredis');
-const client = new redis();
-
-async function consume(userId) {
-  const now = Date.now();
-  const key = `rl:${userId}`;
-  const windowStart = now - 60000;
-
-  const pipeline = client.pipeline();
-  pipeline.zremrangebyscore(key, '-inf', windowStart); // evict old
-  pipeline.zcard(key);                                  // count remaining
-  pipeline.zadd(key, now, `${now}`);                    // add current
-  pipeline.pexpire(key, 60000);                         // TTL cleanup
-
-  const results = await pipeline.exec();
-  const countBefore = results[1][1];
-  if (countBefore >= 5) {
-    await client.zrem(key, `${now}`); // undo the add
-    return { allowed: false };
-  }
-  return { allowed: true, remaining: 5 - countBefore - 1 };
-}
-```
-
-### BullMQ queue (async processing)
-
-```bash
-npm install bullmq ioredis
-```
-
-```js
-const { Queue, Worker } = require('bullmq');
-const queue = new Queue('requests');
-
-router.post('/request', rateLimitMiddleware, async (req, res) => {
-  const job = await queue.add('process', { userId: req.userId, payload: req.body.payload });
-  res.status(202).json({ job_id: job.id, status: 'queued' });
-});
-
-new Worker('requests', async (job) => {
-  console.log('Processing', job.data);
-  // Your actual business logic here
-});
-```
-
-### Retry logic (client-side example)
-
-```js
-async function requestWithRetry(userId, payload, maxRetries = 3) {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const res = await fetch('http://localhost:3000/request', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_id: userId, payload }),
-    });
-
-    if (res.status !== 429) return res.json();
-
-    const { retry_after_seconds } = await res.json();
-    if (attempt < maxRetries) {
-      console.log(`Rate limited. Retrying in ${retry_after_seconds}s...`);
-      await new Promise((r) => setTimeout(r, retry_after_seconds * 1000));
-    }
-  }
-  throw new Error('Max retries exceeded');
-}
-```
-
-### Advanced Architecture (Implemented)
-* **Distributed Rate Limiting:** Uses **Redis Sorted Sets (ZSET)** to implement a highly accurate sliding window. This allows the API to be scaled horizontally across multiple servers while maintaining a strict global rate limit.
-* **Queueing & Async Processing:** Integrated **BullMQ**. Instead of blocking the HTTP response, the API immediately returns `202 Accepted` and offloads the payload to a Redis-backed queue. Background workers process the jobs asynchronously.
-* **Retry Logic:** * *Server-Side:* BullMQ is configured to automatically retry failed payload processing 3 times with exponential backoff.
-  * *Client-Side:* The API provides a `Retry-After` header on `429` responses, allowing clients to implement intelligent delay rather than polling.
-
-### Cloud Deployment (Azure / AWS / GCP)
-The project includes a `Dockerfile` and `docker-compose.yml`. 
-1. **Azure Web Apps for Containers:** Simply push the Docker image to Azure Container Registry (ACR), point Azure App Service to the image, and provide a managed Azure Cache for Redis connection string via the `REDIS_URL` environment variable.
+MIT
