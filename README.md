@@ -165,16 +165,15 @@ wait
 
 ---
 
-## ☁️ Cloud Deployment
+### ☁️ Deployment
 
-This project is fully **cloud-agnostic**. The included `Dockerfile` uses a multi-stage, least-privilege (`USER node`) build optimised for production via `npm ci`.
+This project is containerized using Docker and is fully cloud-agnostic. It is currently deployed and live on Render.
 
-### Azure Web Apps for Containers
+**Live Environment:** https://rate-limited-api-bk0f.onrender.com
 
-1. Push the Docker image to **Azure Container Registry (ACR)**.
-2. Point **Azure App Service** to the image.
-3. Provide an **Azure Cache for Redis** connection string via the `REDIS_URL` environment variable.
+**Platform:** Render Web Service (using the provided Dockerfile).
 
-### AWS ECS / Fargate
+**Database/Cache:** Render Key Value (Redis) instance.
 
-Deploy the container using an **Elasticache Redis** backend as the data store and queue broker.
+**Configuration:** The REDIS_URL is managed via Render’s environment variable dashboard, ensuring secure connectivity between the API and the Redis instance.
+
